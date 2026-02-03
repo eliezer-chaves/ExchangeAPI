@@ -1,34 +1,65 @@
+import os
+import time
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware # Importação necessária
-import yfinance as yf
-from mangum import Mangum
+from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
+import yfinance as yf
+from supabase import create_client, Client
+from mangum import Mangum
 
 app = FastAPI()
+
+
+# Configurações do Supabase (Substitua pelos seus dados ou use variáveis de ambiente)
+SUPABASE_URL = "https://vzkuutyodrrzitsehzhv.supabase.co"
+SUPABASE_KEY = "sb_publishable_uVJijNCB-weCW-BYdzSDZQ_1_D4s7Hm"
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # --- CONFIGURAÇÃO DE CORS ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Permite qualquer site (inclusive seu localhost e o deploy do Angular)
-    allow_credentials=True,
-    allow_methods=["*"], # Permite GET, POST, etc.
-    allow_headers=["*"], # Permite qualquer cabeçalho
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 TICKERS_MAP = {
-    "BRL": "BRL=X", "USD": "USD", "EUR": "EURUSD=X", 
+    "BRL": "BRL=X", "USD": "USD", "EUR": "EURUSD=X",
     "GBP": "GBPUSD=X", "JPY": "JPY=X", "ARS": "ARS=X",
     "BTC": "BTC-USD", "ETH": "ETH-USD", "SOL": "SOL-USD",
     "USDT": "USDT-USD", "ADA": "ADA-USD",
 }
 
+
 def fetch_price(ticker: str) -> float:
-    if ticker == "USD": return 1.0
+    if ticker == "USD":
+        return 1.0
     try:
         data = yf.Ticker(ticker).history(period="1d")
         return float(data["Close"].iloc[-1]) if not data.empty else None
     except:
         return None
+
+
+cache_data = {}
+CACHE_EXPIRE_SECONDS = 300
+
+# --- ROTA DE SAÚDE (PING NO SUPABASE) ---
+
+
+@app.get("/health")
+async def health_check():
+    try:
+        # O comando 'rpc' ou uma query simples mantém o banco ativo
+        # .limit(1) em uma tabela qualquer ou um comando de sistema:
+        supabase.table("profiles").select("*").limit(1).execute()
+        
+
+        return {"status": "ok", "db": "connected", "timestamp": time.time()}
+    except Exception as e:
+        # Se o banco estiver desligado, ele tentará religar ou avisará o erro
+        return {"status": "error", "message": str(e)}
+
 
 @app.get("/latest/{base}")
 async def get_rates(base: str):
@@ -40,7 +71,8 @@ async def get_rates(base: str):
         if not price:
             inv_price = fetch_price(f"USD{base}=X")
             if not inv_price:
-                raise HTTPException(status_code=404, detail="Moeda base não suportada")
+                raise HTTPException(
+                    status_code=404, detail="Moeda base não suportada")
             base_in_usd = 1 / inv_price
         else:
             base_in_usd = price
@@ -64,5 +96,5 @@ async def get_rates(base: str):
 handler = Mangum(app)
 
 if __name__ == "__main__":
-    
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
