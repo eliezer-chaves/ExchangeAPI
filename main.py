@@ -84,7 +84,8 @@ async def get_rates(base: str):
             continue
         target_price_usd = fetch_price(ticker)
         if target_price_usd:
-            rate = base_in_usd / target_price_usd
+            rate = target_price_usd / base_in_usd
+            #rate = base_in_usd / target_price_usd
             conversion_rates[code] = round(rate, 8)
 
     return {
