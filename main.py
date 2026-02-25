@@ -132,7 +132,7 @@ async def get_rates(base: str):
         target_price_usd = fetch_price(target_ticker)
 
         if target_price_usd is not None:
-            rate = target_price_usd / base_in_usd
+            rate = base_in_usd / target_price_usd
             conversion_rates[code] = round(rate, 8)
         else:
             print(f"Aviso: Não foi possível obter a cotação para {code} ({target_ticker}).")
