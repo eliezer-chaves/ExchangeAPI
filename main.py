@@ -21,8 +21,8 @@ app.add_middleware(
 # -------------------------------
 # Supabase
 # -------------------------------
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://vzkuutyodrrzitsehzhv.supabase.co")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "sb_publishable_uVJijNCB-weCW-BYdzSDZQ_1_D4s7Hm")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # -------------------------------
