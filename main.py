@@ -93,32 +93,14 @@ async def health_check():
 async def get_rates(base: str):
     base = base.upper()
 
+    # 1. Busca detalhes da moeda base
     base_currency_details = await get_currency_details(base)
     if not base_currency_details:
-        raise HTTPException(status_code=404, detail=f"Moeda base '{base}' não encontrada ou não suportada.")
+        raise HTTPException(status_code=404, detail=f"Moeda base '{base}' não encontrada.")
 
-    base_is_crypto = base_currency_details["is_crypto"]
-
-    base_in_usd = 1.0
-    if base != "USD":
-        base_ticker = get_yf_ticker(base, base_is_crypto)
-        price = fetch_price(base_ticker)
-        if price:
-            base_in_usd = price
-        else:
-            # Tenta a conversão inversa se a direta falhar (apenas para fiat)
-            if not base_is_crypto:
-                inv_ticker = get_yf_ticker("USD", False) # USD é fiat
-                inv_price = fetch_price(get_yf_ticker(base, False))
-                if inv_price:
-                    base_in_usd = 1 / inv_price
-                else:
-                    raise HTTPException(status_code=404, detail=f"Não foi possível obter a cotação para a moeda base '{base}'.")
-            else:
-                raise HTTPException(status_code=404, detail=f"Não foi possível obter a cotação para a criptomoeda base '{base}'.")
-
-    conversion_rates = {}
+    # 2. Obtém todas as moedas para retornar no mapa
     all_currencies = await get_all_currencies_details()
+    conversion_rates = {}
 
     for currency_detail in all_currencies:
         code = currency_detail["code"]
@@ -128,21 +110,22 @@ async def get_rates(base: str):
             conversion_rates[code] = 1.0
             continue
 
-        target_ticker = get_yf_ticker(code, is_crypto)
-        target_price_usd = fetch_price(target_ticker)
+        # 3. LÓGICA DE SENIOR: 
+        # Retornamos o valor de cada moeda EM DÓLAR (Âncora).
+        # O ExchangeService no Angular fará a regra de três (Cross Rate).
+        ticker = get_yf_ticker(code, is_crypto)
+        price_in_usd = fetch_price(ticker)
 
-        if target_price_usd is not None:
-            rate = base_in_usd / target_price_usd
-            conversion_rates[code] = round(rate, 8)
-        else:
-            print(f"Aviso: Não foi possível obter a cotação para {code} ({target_ticker}).")
+        if price_in_usd is not None:
+            # Armazenamos o valor da moeda em relação ao USD
+            # Ex: BRL -> 0.18 | BTC -> 65000.0 | EUR -> 1.08
+            conversion_rates[code] = round(price_in_usd, 8)
 
     return {
         "result": "success",
         "base_code": base,
         "conversion_rates": conversion_rates
     }
-
 handler = Mangum(app)
 
 if __name__ == "__main__":
