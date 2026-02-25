@@ -1,19 +1,16 @@
-import os, time
+import os
+import time
+import yfinance as yf
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
-import yfinance as yf
 from supabase import create_client, Client
 from mangum import Mangum
 
+# -------------------------------
+# App
+# -------------------------------
 app = FastAPI()
 
-# Configurações do Supabase (Substitua pelos seus dados ou use variáveis de ambiente)
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://vzkuutyodrrzitsehzhv.supabase.co")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "sb_publishable_uVJijNCB-weCW-BYdzSDZQ_1_D4s7Hm")
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# --- CONFIGURAÇÃO DE CORS ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,112 +18,100 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Cache para armazenar informações das moedas e evitar múltiplas chamadas ao Supabase
-currency_info_cache = {}
-CACHE_EXPIRE_SECONDS = 300
+# -------------------------------
+# Supabase
+# -------------------------------
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-async def get_currency_details(currency_code: str):
-    current_time = time.time()
-    if currency_code in currency_info_cache and \
-       (current_time - currency_info_cache[currency_code]["timestamp"] < CACHE_EXPIRE_SECONDS):
-        return currency_info_cache[currency_code]["data"]
+# -------------------------------
+# Cache simples
+# -------------------------------
+CACHE_TTL = 300
+currency_cache = {}
 
-    try:
-        response = supabase.table("currencies").select("code, is_crypto").eq("code", currency_code).single().execute()
-        data = response.data
-        if data:
-            currency_info_cache[currency_code] = {"data": data, "timestamp": current_time}
-            return data
-    except Exception as e:
-        print(f"Erro ao buscar detalhes da moeda {currency_code} no Supabase: {e}")
-    return None
-
-async def get_all_currencies_details():
-    current_time = time.time()
-    if "all_currencies" in currency_info_cache and \
-       (current_time - currency_info_cache["all_currencies"]["timestamp"] < CACHE_EXPIRE_SECONDS):
-        return currency_info_cache["all_currencies"]["data"]
-
-    try:
-        response = supabase.table("currencies").select("code, is_crypto").execute()
-        data = response.data
-        if data:
-            currency_info_cache["all_currencies"] = {"data": data, "timestamp": current_time}
-            return data
-    except Exception as e:
-        print(f"Erro ao buscar todas as moedas no Supabase: {e}")
-    return []
-
-def get_yf_ticker(currency_code: str, is_crypto: bool):
-    if currency_code == "USD":
+# -------------------------------
+# Helpers
+# -------------------------------
+def get_yf_ticker(code: str, is_crypto: bool) -> str:
+    if code == "USD":
         return "USD"
     if is_crypto:
-        return f"{currency_code}-USD"
-    return f"{currency_code}=X"
+        return f"{code}-USD"
+    return f"{code}=X"
 
-def fetch_price(ticker: str) -> float:
+
+def fetch_usd_price(ticker: str) -> float | None:
     if ticker == "USD":
         return 1.0
+
     try:
         data = yf.Ticker(ticker).history(period="1d")
         if not data.empty:
             return float(data["Close"].iloc[-1])
     except Exception as e:
-        print(f"Erro ao buscar preço para o ticker {ticker}: {e}")
+        print(f"[yfinance] erro {ticker}: {e}")
+
     return None
 
-cache_data = {}
 
-# --- ROTA DE SAÚDE (PING NO SUPABASE) ---
-@app.get("/health")
-async def health_check():
-    try:
-        # O comando 'rpc' ou uma query simples mantém o banco ativo
-        # .limit(1) em uma tabela qualquer ou um comando de sistema:
-        supabase.table("profiles").select("*").limit(1).execute()
-        return {"status": "ok", "db": "connected", "timestamp": time.time()}
-    except Exception as e:
-        # Se o banco estiver desligado, ele tentará religar ou avisará o erro
-        return {"status": "error", "message": str(e)}
+def get_all_currencies():
+    now = time.time()
+    if "all" in currency_cache and now - currency_cache["all"]["ts"] < CACHE_TTL:
+        return currency_cache["all"]["data"]
 
+    res = supabase.table("currencies").select("code, is_crypto").execute()
+    if not res.data:
+        raise HTTPException(500, "Currencies not found")
+
+    currency_cache["all"] = {"data": res.data, "ts": now}
+    return res.data
+
+
+# -------------------------------
+# Endpoint
+# -------------------------------
 @app.get("/latest/{base}")
-async def get_rates(base: str):
-    base = base.upper()
+async def latest(base: str):
+    currencies = get_all_currencies()
 
-    # 1. Busca detalhes da moeda base
-    base_currency_details = await get_currency_details(base)
-    if not base_currency_details:
-        raise HTTPException(status_code=404, detail=f"Moeda base '{base}' não encontrada.")
+    base_currency = next((c for c in currencies if c["code"] == base), None)
+    if not base_currency:
+        raise HTTPException(400, "Invalid base currency")
 
-    # 2. Obtém todas as moedas para retornar no mapa
-    all_currencies = await get_all_currencies_details()
-    conversion_rates = {}
+    # --- base → USD ---
+    base_ticker = get_yf_ticker(base, base_currency["is_crypto"])
+    base_usd_price = fetch_usd_price(base_ticker)
 
-    for currency_detail in all_currencies:
-        code = currency_detail["code"]
-        is_crypto = currency_detail["is_crypto"]
+    if not base_usd_price:
+        raise HTTPException(400, "Base currency unavailable")
 
-        if code == base:
-            conversion_rates[code] = 1.0
+    rates = {}
+    unit_reference = {}
+
+    for currency in currencies:
+        ticker = get_yf_ticker(currency["code"], currency["is_crypto"])
+        usd_price = fetch_usd_price(ticker)
+
+        if not usd_price:
             continue
 
-        # 3. LÓGICA DE SENIOR: 
-        # Retornamos o valor de cada moeda EM DÓLAR (Âncora).
-        # O ExchangeService no Angular fará a regra de três (Cross Rate).
-        ticker = get_yf_ticker(code, is_crypto)
-        price_in_usd = fetch_price(ticker)
+        # USD → BASE
+        value_in_base = usd_price / base_usd_price
 
-        if price_in_usd is not None:
-            # Armazenamos o valor da moeda em relação ao USD
-            # Ex: BRL -> 0.18 | BTC -> 65000.0 | EUR -> 1.08
-            conversion_rates[code] = round(price_in_usd, 8)
+        rates[currency["code"]] = round(value_in_base, 10)
+        unit_reference[currency["code"]] = (
+            f"1 {currency['code']} = {value_in_base:.6f} {base}"
+        )
 
     return {
         "result": "success",
-        "base_code": base,
-        "conversion_rates": conversion_rates
+        "base": base,
+        "rates": rates,
+        "unit_reference": unit_reference,
+        "timestamp": time.time(),
     }
-handler = Mangum(app)
 
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+handler = Mangum(app)
